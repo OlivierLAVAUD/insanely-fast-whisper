@@ -1,6 +1,7 @@
+![Audio Transcription — 2.5 hours in 98 seconds](image.png)
+
 # ⚡ Audio Transcription: 2.5 Hours in 98 Seconds on Your Laptop
 ## How a radically optimized Whisper is a game-changer for local transcription.
-"2.5 hours of audio transcribed in 98 seconds. Locally on your laptop."
 
 That sounds like a marketing promise too good to be true. Yet, that's exactly what insanely-fast-whisper delivers—an ultra-optimized version of OpenAI's Whisper transcription model.
 
@@ -47,15 +48,15 @@ Step-by-Step Installation
 
 1. Project and Virtual Environment Initialization
 
-# Creates a new folder and a dedicated virtual environment
+### Creates a new folder and a dedicated virtual environment
 ```bash
-uv init insanely-fast-whisper
+git clone https://github.com/OlivierLAVAUD/insanely-fast-whisper
 cd insanely-fast-whisper
 uv venv
 ```
 
-# Activate the virtual environment
-# On macOS/Linux:
+### Activate the virtual environment
+### On macOS/Linux:
 ```bash
 source .venv/bin/activate
 # On Windows (PowerShell):
@@ -83,17 +84,26 @@ uv pip install torch torchvision torchaudio --index-url https://download.pytorch
 ```
 
 4. Creating a Hugging Face Access Token
+
 The diarization model (pyannote) is gated and requires accepting a license. You need to create an access token.
 
 👉 Go to huggingface.co/settings/tokens.
+
 👉 Click on "New token".
+
 👉 Choose the "Fine-Grained" type.
+
 👉 Give it a name (e.g., pyannote-diarization).
+
 👉 Under "Permissions", select "Read" for model access.
+
 👉 Under "Repository permissions", search for and select pyannote/speaker-diarization-3.1.
+
 👉 Copy the generated token. You will need it to run the transcription.
 
+
 ## Running the Transcription
+
 Once everything is configured, the command to run a transcription with diarization is simple
 
 ```bash

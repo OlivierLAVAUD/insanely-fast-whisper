@@ -2,308 +2,160 @@ import torch
 from transformers import pipeline
 from pyannote.audio import Pipeline
 import torchaudio
-import tempfile
-import os
-import json
-from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-import logging
+import numpy as np
+from pyannote.core import Segment
 
-# Configuration du logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Set your Hugging Face token
+HF_TOKEN = "hf_your_token_here"  # Replace with your classic token
 
-HF_TOKEN = ""
 
-@dataclass
-class TranscriptionSegment:
-    start: float
-    end: float
-    speaker: str
-    text: str
-    confidence: Optional[float] = None
+def resample_audio(audio_file_path, target_sr=16000):
+    """Resample audio to target sample rate for pyannote compatibility"""
+    waveform, original_sr = torchaudio.load(audio_file_path)
+    if original_sr != target_sr:
+        resampler = torchaudio.transforms.Resample(original_sr, target_sr)
+        waveform = resampler(waveform)
+    return waveform, target_sr
 
-@dataclass
-class TranscriptionResult:
-    segments: List[TranscriptionSegment]
-    language: str
-    duration: float
-    processing_time: float
-    model_used: str
-    diarization_applied: bool
-
-class AudioTranscriber:
-    def __init__(self, hf_token: str = HF_TOKEN):
-        self.hf_token = hf_token
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.whisper_pipeline = None
-        self.diarization_pipeline = None
-        self._initialize_models()
+def transcribe_with_diarization(audio_file_path):
+    # Check if CUDA is available
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
     
-    def _initialize_models(self):
-        """Initialize les modèles de manière lazy"""
-        logger.info(f"Initializing models on device: {self.device}")
-        
-        # Whisper model
-        self.whisper_pipeline = pipeline(
-            "automatic-speech-recognition",
-            model="openai/whisper-large-v3",
-            torch_dtype=torch.float16 if "cuda" in self.device else torch.float32,
-            device=self.device,
-            token=self.hf_token
+    # Load Whisper model
+    print("Loading Whisper model...")
+    whisper_pipe = pipeline(
+        "automatic-speech-recognition",
+        model="openai/whisper-large-v3",
+        torch_dtype=torch.float16,
+        device=device,
+        token=HF_TOKEN
+    )
+    
+    # Transcribe audio
+    print("Transcribing audio...")
+    outputs = whisper_pipe(
+        audio_file_path,
+        chunk_length_s=30,
+        batch_size=8,
+        return_timestamps=True
+    )
+    
+    # Load speaker diarization model with error handling
+    print("Loading speaker diarization model...")
+    try:
+        diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=HF_TOKEN
         )
+        diarization_pipeline.to(torch.device(device))
+    except Exception as e:
+        print(f"Diarization model loading failed: {e}")
+        print("Returning transcription without speaker labels")
+        return outputs["chunks"]
     
-    def _load_diarization_model(self):
-        """Charge le modèle de diarization si nécessaire"""
-        if self.diarization_pipeline is None:
-            try:
-                self.diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=self.hf_token
-                )
-                self.diarization_pipeline.to(torch.device(self.device))
-                logger.info("Diarization model loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load diarization model: {e}")
-                raise
-    
-    def resample_audio(self, audio_file_path: str, target_sr: int = 16000) -> str:
-        """Resample l'audio et retourne le chemin du fichier temporaire"""
-        try:
-            waveform, original_sr = torchaudio.load(audio_file_path)
-            
-            if original_sr != target_sr:
-                resampler = torchaudio.transforms.Resample(original_sr, target_sr)
-                waveform = resampler(waveform)
-            
-            # Crée un fichier temporaire pour l'audio resamplé
-            temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            torchaudio.save(temp_file.name, waveform, target_sr)
-            return temp_file.name
-            
-        except Exception as e:
-            logger.error(f"Audio resampling failed: {e}")
-            raise
-    
-    def transcribe_audio(self, audio_file_path: str, language: str = "fr") -> List[Dict]:
-        """Transcription de base avec Whisper"""
-        try:
-            outputs = self.whisper_pipeline(
-                audio_file_path,
-                chunk_length_s=30,
-                batch_size=8,
-                return_timestamps=True,
-                language=language
-            )
-            return outputs["chunks"]
-        except Exception as e:
-            logger.error(f"Transcription failed: {e}")
-            raise
-    
-    def apply_diarization(self, audio_file_path: str, segments: List[Dict]) -> List[TranscriptionSegment]:
-        """Applique la diarization aux segments transcrits"""
-        try:
-            self._load_diarization_model()
-            
-            # Utilise l'audio resamplé pour la diarization
-            resampled_audio_path = self.resample_audio(audio_file_path)
-            
-            try:
-                diarization_result = self.diarization_pipeline(resampled_audio_path)
-                
-                # Map des speakers aux segments
-                transcription_segments = []
-                for segment in segments:
-                    speaker = "SPEAKER_00"
-                    for turn, _, speaker_label in diarization_result.itertracks(yield_label=True):
-                        if turn.start <= segment["timestamp"][0] <= turn.end:
-                            speaker = speaker_label
-                            break
-                    
-                    transcription_segments.append(TranscriptionSegment(
-                        start=segment["timestamp"][0],
-                        end=segment["timestamp"][1],
-                        speaker=speaker,
-                        text=segment["text"].strip(),
-                        confidence=segment.get("confidence", 0.9)
-                    ))
-                
-                return transcription_segments
-                
-            finally:
-                # Nettoie le fichier temporaire
-                if os.path.exists(resampled_audio_path):
-                    os.unlink(resampled_audio_path)
-                    
-        except Exception as e:
-            logger.warning(f"Diarization failed, returning segments without speaker identification: {e}")
-            # Fallback: retourne les segments sans diarization
-            return [
-                TranscriptionSegment(
-                    start=seg["timestamp"][0],
-                    end=seg["timestamp"][1],
-                    speaker="SPEAKER_00",
-                    text=seg["text"].strip(),
-                    confidence=seg.get("confidence", 0.9)
-                )
-                for seg in segments
-            ]
-    
-    def process_audio(self, audio_file_path: str, enable_diarization: bool = True, 
-                     language: str = "en") -> TranscriptionResult:
-        """Processus complet de transcription"""
-        start_time = datetime.now()
+    # Perform speaker diarization with resampled audio
+    print("Performing speaker diarization...")
+    try:
+        # Create a temporary resampled audio file
+        import tempfile
+        import os
         
-        try:
-            # Transcription de base
-            logger.info("Starting transcription...")
-            raw_segments = self.transcribe_audio(audio_file_path, language)
-            
-            # Application de la diarization si demandée
-            if enable_diarization:
-                logger.info("Applying diarization...")
-                segments = self.apply_diarization(audio_file_path, raw_segments)
-            else:
-                segments = [
-                    TranscriptionSegment(
-                        start=seg["timestamp"][0],
-                        end=seg["timestamp"][1],
-                        speaker="SPEAKER_00",
-                        text=seg["text"].strip(),
-                        confidence=seg.get("confidence", 0.9)
-                    )
-                    for seg in raw_segments
-                ]
-            
-            # Calcul de la durée totale
-            duration = segments[-1].end if segments else 0
-            
-            processing_time = (datetime.now() - start_time).total_seconds()
-            
-            return TranscriptionResult(
-                segments=segments,
-                language=language,
-                duration=duration,
-                processing_time=processing_time,
-                model_used="whisper-large-v3",
-                diarization_applied=enable_diarization
-            )
-            
-        except Exception as e:
-            logger.error(f"Audio processing failed: {e}")
-            raise
-
-class TranscriptionExporter:
-    """Classe pour exporter les résultats dans différents formats"""
-    
-    @staticmethod
-    def to_txt(result: TranscriptionResult, output_path: str) -> None:
-        """Export en format texte"""
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(f"Transcription Results\n")
-            f.write(f"====================\n")
-            f.write(f"Language: {result.language}\n")
-            f.write(f"Duration: {result.duration:.2f}s\n")
-            f.write(f"Processing time: {result.processing_time:.2f}s\n")
-            f.write(f"Diarization: {'Enabled' if result.diarization_applied else 'Disabled'}\n\n")
-            
-            for segment in result.segments:
-                f.write(f"[{segment.speaker}] {segment.start:.1f}-{segment.end:.1f}: {segment.text}\n")
-    
-    @staticmethod
-    def to_json(result: TranscriptionResult, output_path: str) -> None:
-        """Export en format JSON"""
-        output_data = {
-            "metadata": {
-                "language": result.language,
-                "duration": result.duration,
-                "processing_time": result.processing_time,
-                "model_used": result.model_used,
-                "diarization_applied": result.diarization_applied,
-                "generated_at": datetime.now().isoformat()
-            },
-            "segments": [
-                {
-                    "start": seg.start,
-                    "end": seg.end,
-                    "speaker": seg.speaker,
-                    "text": seg.text,
-                    "confidence": seg.confidence
-                }
-                for seg in result.segments
-            ]
-        }
+        waveform, sr = resample_audio(audio_file_path)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            torchaudio.save(tmp_file.name, waveform, sr)
+            diarization = diarization_pipeline(tmp_file.name)
+        os.unlink(tmp_file.name)
+        
+    except Exception as e:
+        print(f"Diarization failed: {e}")
+        print("Returning transcription without speaker labels")
+        return outputs["chunks"]
     
-    @staticmethod
-    def to_srt(result: TranscriptionResult, output_path: str) -> None:
-        """Export en format SRT (sous-titres)"""
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for i, segment in enumerate(result.segments, 1):
-                # Format SRT timing
-                start_time = TranscriptionExporter._format_srt_time(segment.start)
-                end_time = TranscriptionExporter._format_srt_time(segment.end)
-                
-                f.write(f"{i}\n")
-                f.write(f"{start_time} --> {end_time}\n")
-                f.write(f"[{segment.speaker}] {segment.text}\n\n")
+    # Combine transcription with speaker labels
+    print("Combining results...")
+    segments = outputs["chunks"]
     
-    @staticmethod
-    def _format_srt_time(seconds: float) -> str:
-        """Convertit des secondes en format SRT HH:MM:SS,mmm"""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = seconds % 60
-        milliseconds = int((secs - int(secs)) * 1000)
-        return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{milliseconds:03d}"
+    final_output = []
+    for segment in segments:
+        start_time = segment["timestamp"][0]
+        end_time = segment["timestamp"][1]
+        text = segment["text"]
+        
+        # Find speaker for this time segment
+        speaker = "SPEAKER_00"
+        try:
+            for turn, _, speaker_label in diarization.itertracks(yield_label=True):
+                if turn.start <= start_time <= turn.end:
+                    speaker = speaker_label
+                    break
+        except:
+            pass  # Fallback to default speaker if diarization fails
+        
+        final_output.append({
+            "start": start_time,
+            "end": end_time,
+            "speaker": speaker,
+            "text": text.strip()
+        })
+    
+    return final_output
 
-# Usage example
-def main():
-    audio_file = "audio.mp3"
+def save_transcription(results, output_file="transcription.txt"):
+    """Save transcription to file"""
+    with open(output_file, "w", encoding="utf-8") as f:
+        for segment in results:
+            f.write(f"[{segment['speaker']}] {segment['start']:.1f}-{segment['end']:.1f}: {segment['text']}\n")
+    
+    print(f"Transcription saved to {output_file}")
+
+# Alternative: Simple transcription without diarization
+def simple_transcribe(audio_file_path):
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model="openai/whisper-large-v3",
+        device=device,
+        torch_dtype=torch.float16,
+        token=HF_TOKEN
+    )
+    
+    result = pipe(audio_file_path, return_timestamps=True)
+    return result["chunks"]
+
+# Main execution
+if __name__ == "__main__":
+    audio_file = "audio.mp3"  # Replace with your audio file path
     
     try:
-        # Initialise le transcripteur
-        transcriber = AudioTranscriber(HF_TOKEN)
+        # Try with diarization first
+        results = transcribe_with_diarization(audio_file)
         
-        # Processus de transcription
-        result = transcriber.process_audio(
-            audio_file_path=audio_file,
-            enable_diarization=True,
-            language="en"
-        )
+        # Print results
+        print("\n=== TRANSCRIPTION RESULTS ===")
+        for segment in results:
+            print(f"[{segment['speaker']}] {segment['start']:.1f}-{segment['end']:.1f}: {segment['text']}")
         
-        # Affiche les résultats
-        print(f"\n=== TRANSCRIPTION COMPLÉTÉE ===")
-        print(f"Durée audio: {result.duration:.2f}s")
-        print(f"Temps de traitement: {result.processing_time:.2f}s")
-        print(f"Segments: {len(result.segments)}")
-        print(f"Diarization: {'Oui' if result.diarization_applied else 'Non'}")
+        # Save to file
+        save_transcription(results)
         
-        # Exporte les résultats
-        exporter = TranscriptionExporter()
-        exporter.to_txt(result, "transcription.txt")
-        exporter.to_json(result, "transcription.json")
-        exporter.to_srt(result, "transcription.srt")
-        
-        print(f"\nRésultats exportés dans:")
-        print(f"- transcription.txt")
-        print(f"- transcription.json") 
-        print(f"- transcription.srt")
-        
-        # Affiche un aperçu
-        print(f"\n=== APERÇU ===")
-        for i, segment in enumerate(result.segments[:5]):  # Premier 5 segments
-            print(f"[{segment.speaker}] {segment.start:.1f}-{segment.end:.1f}: {segment.text}")
-        
-        if len(result.segments) > 5:
-            print(f"... et {len(result.segments) - 5} segments supplémentaires")
-            
     except Exception as e:
-        logger.error(f"Erreur lors du traitement: {e}")
-        print("Échec du traitement. Vérifiez le fichier audio et la connexion.")
-
-if __name__ == "__main__":
-    main()
+        print(f"Main error: {e}")
+        print("Falling back to simple transcription...")
+        
+        # Fallback to simple transcription
+        try:
+            results = simple_transcribe(audio_file)
+            print("\n=== SIMPLE TRANSCRIPTION (No speakers) ===")
+            for segment in results:
+                print(f"{segment['timestamp'][0]:.1f}-{segment['timestamp'][1]:.1f}: {segment['text']}")
+            
+            # Save simple version
+            with open("transcription_simple.txt", "w", encoding="utf-8") as f:
+                for segment in results:
+                    f.write(f"{segment['timestamp'][0]:.1f}-{segment['timestamp'][1]:.1f}: {segment['text']}\n")
+            
+        except Exception as e2:
+            print(f"Simple transcription also failed: {e2}")

@@ -1,4 +1,4 @@
-![Audio Transcription — 2.5 hours in 98 seconds](image.png)
+![Audio Transcription — 2.5 hours in 98 seconds](img/image.png)
 
 # ⚡ Audio Transcription: 2.5 Hours in 98 Seconds on Your Laptop
 ## How a radically optimized Whisper is a game-changer for local transcription.
@@ -152,3 +152,9 @@ Run the application with your audio file:
 ```bash
 uv run app.py
 ```
+
+
+# Results
+
+![run in command line](img/test-1.png)
+![run with app](img/test-2.png)
